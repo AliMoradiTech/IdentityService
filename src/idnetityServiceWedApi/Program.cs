@@ -4,11 +4,21 @@ using idnetityServiceWedApi.Features.Auth.Login;
 using idnetityServiceWedApi.Features.Auth.Register;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Serilog;
 using Scalar.AspNetCore;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 using idnetityServiceWedApi.Messaging;
 
 var builder = WebApplication.CreateBuilder(args);
+
+Log.Logger = new LoggerConfiguration()
+    .ReadFrom.Configuration(builder.Configuration)
+    .Enrich.FromLogContext()
+    .Enrich.WithProperty("Application", "IdentityService")
+    .WriteTo.Console()
+    .WriteTo.Seq(builder.Configuration["Seq:ServerUrl"] ?? "http://localhost:15341")
+    .CreateLogger();
+builder.Host.UseSerilog();
 
 builder.Services.AddOpenApi();
 
@@ -63,25 +73,34 @@ builder.Services
 
 var app = builder.Build();
 
-await using (var scope = app.Services.CreateAsyncScope())
+app.UseSerilogRequestLogging();
+
+try
 {
-    var dbContext = scope.ServiceProvider.GetRequiredService<AuthDbContext>();
-    await dbContext.Database.MigrateAsync();
-}
+    await using (var scope = app.Services.CreateAsyncScope())
+    {
+        var dbContext = scope.ServiceProvider.GetRequiredService<AuthDbContext>();
+        await dbContext.Database.MigrateAsync();
+    }
 
-if (app.Environment.IsDevelopment())
+    if (app.Environment.IsDevelopment())
+    {
+        app.MapOpenApi();
+        app.MapScalarApiReference();
+    }
+
+    app.UseHttpMethodOverride();
+
+    app.UseAuthentication();
+    app.UseAuthorization();
+
+    app.MapRegisterEndpoint();
+    app.MapJsonLoginEndpoint();
+    app.MapLoginEndpoint();
+
+    await app.RunAsync();
+}
+finally
 {
-    app.MapOpenApi();
-    app.MapScalarApiReference();
+    await Log.CloseAndFlushAsync();
 }
-
-app.UseHttpMethodOverride();
-
-app.UseAuthentication();
-app.UseAuthorization();
-
-app.MapRegisterEndpoint();
-app.MapJsonLoginEndpoint();
-app.MapLoginEndpoint();
-
-app.Run();
