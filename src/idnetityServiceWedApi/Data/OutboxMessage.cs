@@ -13,4 +13,7 @@ public sealed class OutboxMessage
     public DateTimeOffset? DispatchedAt { get; set; }
     public int Attempts { get; set; }
     public string? Error { get; set; }
+    public DateTimeOffset? DeadLetteredAt { get; set; }
+    public Guid? LockId { get; set; }
+    public DateTimeOffset? LockedUntil { get; set; }
 }

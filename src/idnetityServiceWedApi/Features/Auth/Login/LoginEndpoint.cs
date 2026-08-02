@@ -17,7 +17,8 @@ public static class LoginEndpoint
         app.MapPost("/api/auth/token", async (
             HttpContext httpContext,
             UserManager<ApplicationUser> userManager,
-            SignInManager<ApplicationUser> signInManager) =>
+            SignInManager<ApplicationUser> signInManager,
+            IConfiguration configuration) =>
         {
             var request = httpContext.GetOpenIddictServerRequest()
                 ?? throw new InvalidOperationException("The OpenIddict server request could not be retrieved.");
@@ -36,7 +37,8 @@ public static class LoginEndpoint
                     return ForbidWithError(Errors.InvalidGrant, "The username/password combination is invalid.");
                 }
 
-                var principal = await CreatePrincipalAsync(user, userManager);
+                var principal = await CreatePrincipalAsync(
+                    user, userManager, request.GetScopes(), GetAudience(configuration));
                 return Results.SignIn(principal, authenticationScheme: OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
             }
 
@@ -55,7 +57,15 @@ public static class LoginEndpoint
                     return ForbidWithError(Errors.InvalidGrant, "The refresh token is no longer valid.");
                 }
 
-                var principal = await CreatePrincipalAsync(user, userManager);
+                // A refresh request that omits "scope" preserves the original grant. Resolve
+                // effective scopes before assigning claim destinations so identity-token claims
+                // remain consistent with those scopes.
+                IEnumerable<string> effectiveScopes = request.GetScopes().Any()
+                    ? request.GetScopes()
+                    : authenticateResult.Principal!.GetScopes();
+                var principal = await CreatePrincipalAsync(
+                    user, userManager, effectiveScopes, GetAudience(configuration));
+
                 return Results.SignIn(principal, authenticationScheme: OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
             }
 
@@ -63,7 +73,15 @@ public static class LoginEndpoint
         });
     }
 
-    private static async Task<ClaimsPrincipal> CreatePrincipalAsync(ApplicationUser user, UserManager<ApplicationUser> userManager)
+    /// <summary>Scopes this authorization server is willing to issue.</summary>
+    private static readonly string[] SupportedScopes =
+        [Scopes.OpenId, Scopes.Email, Scopes.Profile, Scopes.Roles, Scopes.OfflineAccess];
+
+    private static async Task<ClaimsPrincipal> CreatePrincipalAsync(
+        ApplicationUser user,
+        UserManager<ApplicationUser> userManager,
+        IEnumerable<string> requestedScopes,
+        string audience)
     {
         var identity = new ClaimsIdentity(
             authenticationType: "Bearer",
@@ -78,7 +96,11 @@ public static class LoginEndpoint
         identity.SetClaims(Claims.Role, [.. roles]);
 
         var principal = new ClaimsPrincipal(identity);
-        principal.SetScopes(Scopes.OpenId, Scopes.Email, Scopes.Profile, Scopes.Roles, Scopes.OfflineAccess);
+
+        // Grant only what the client asked for, intersected with what this server supports,
+        // so a client that requests no offline_access does not silently receive a refresh token.
+        principal.SetScopes(requestedScopes.Intersect(SupportedScopes));
+        principal.SetResources(audience);
 
         foreach (var claim in identity.Claims)
         {
@@ -87,6 +109,10 @@ public static class LoginEndpoint
 
         return principal;
     }
+
+    private static string GetAudience(IConfiguration configuration) =>
+        configuration["OpenIddict:Audience"]
+        ?? throw new InvalidOperationException("OpenIddict:Audience is required.");
 
     private static IEnumerable<string> GetDestinations(Claim claim, ClaimsPrincipal principal)
     {

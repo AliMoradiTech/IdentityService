@@ -24,6 +24,8 @@ public sealed class AuthDbContext(DbContextOptions<AuthDbContext> options)
             entity.Property(message => message.TraceParent).HasMaxLength(256);
             entity.Property(message => message.TraceState).HasMaxLength(512);
             entity.Property(message => message.Error).HasMaxLength(2048);
+            entity.HasIndex(message => new { message.DispatchedAt, message.DeadLetteredAt, message.LockedUntil, message.CreatedAt })
+                .HasDatabaseName("IX_OutboxMessage_Pending");
         });
     }
 }
