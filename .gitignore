@@ -483,3 +483,4 @@ mono_crash.*
 !.elasticbeanstalk/*.cfg.yml
 !.elasticbeanstalk/*.global.yml 
 *.md
+!README.md
