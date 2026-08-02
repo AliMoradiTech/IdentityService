@@ -12,9 +12,11 @@ namespace idnetityServiceWedApi.Features.Auth.Login;
 
 public static class LoginEndpoint
 {
-    public static void MapLoginEndpoint(this IEndpointRouteBuilder app)
+    private const string SecurityStampClaim = "identity_security_stamp";
+
+    public static void MapLoginEndpoint(this IEndpointRouteBuilder app, bool rateLimitingEnabled)
     {
-        app.MapPost("/api/auth/token", async (
+        RouteHandlerBuilder endpoint = app.MapPost("/api/auth/token", async (
             HttpContext httpContext,
             UserManager<ApplicationUser> userManager,
             SignInManager<ApplicationUser> signInManager,
@@ -52,7 +54,10 @@ public static class LoginEndpoint
                 }
 
                 var user = await userManager.FindByIdAsync(userId);
-                if (user is null)
+                if (user is null ||
+                    !await signInManager.CanSignInAsync(user) ||
+                    await userManager.IsLockedOutAsync(user) ||
+                    !await HasValidSecurityStampAsync(authenticateResult.Principal!, user, userManager))
                 {
                     return ForbidWithError(Errors.InvalidGrant, "The refresh token is no longer valid.");
                 }
@@ -71,6 +76,11 @@ public static class LoginEndpoint
 
             return ForbidWithError(Errors.UnsupportedGrantType, "The specified grant type is not supported.");
         });
+
+        if (rateLimitingEnabled)
+        {
+            endpoint.RequireRateLimiting("token");
+        }
     }
 
     /// <summary>Scopes this authorization server is willing to issue.</summary>
@@ -94,6 +104,7 @@ public static class LoginEndpoint
 
         var roles = await userManager.GetRolesAsync(user);
         identity.SetClaims(Claims.Role, [.. roles]);
+        identity.SetClaim(SecurityStampClaim, await userManager.GetSecurityStampAsync(user));
 
         var principal = new ClaimsPrincipal(identity);
 
@@ -113,6 +124,17 @@ public static class LoginEndpoint
     private static string GetAudience(IConfiguration configuration) =>
         configuration["OpenIddict:Audience"]
         ?? throw new InvalidOperationException("OpenIddict:Audience is required.");
+
+    private static async Task<bool> HasValidSecurityStampAsync(
+        ClaimsPrincipal principal,
+        ApplicationUser user,
+        UserManager<ApplicationUser> userManager)
+    {
+        string? tokenStamp = principal.GetClaim(SecurityStampClaim);
+        string currentStamp = await userManager.GetSecurityStampAsync(user);
+        return !string.IsNullOrEmpty(tokenStamp) &&
+               string.Equals(tokenStamp, currentStamp, StringComparison.Ordinal);
+    }
 
     private static IEnumerable<string> GetDestinations(Claim claim, ClaimsPrincipal principal)
     {
@@ -140,6 +162,11 @@ public static class LoginEndpoint
                 {
                     yield return Destinations.IdentityToken;
                 }
+                yield break;
+
+            case SecurityStampClaim:
+                // OpenIddict keeps private claims in encrypted refresh tokens automatically.
+                // Never expose the security stamp in access or identity tokens.
                 yield break;
 
             default:

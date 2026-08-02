@@ -10,9 +10,9 @@ namespace idnetityServiceWedApi.Features.Auth.Register;
 
 public static class RegisterEndpoint
 {
-    public static void MapRegisterEndpoint(this IEndpointRouteBuilder app)
+    public static void MapRegisterEndpoint(this IEndpointRouteBuilder app, bool rateLimitingEnabled)
     {
-        app.MapPost("/api/auth/register", async (
+        RouteHandlerBuilder endpoint = app.MapPost("/api/auth/register", async (
             RegisterRequest request,
             IValidator<RegisterRequest> validator,
             UserManager<ApplicationUser> userManager,
@@ -47,5 +47,10 @@ public static class RegisterEndpoint
             await transaction.CommitAsync();
             return Results.Created($"/api/auth/users/{user.Id}", new { user.Id, user.Email });
         });
+
+        if (rateLimitingEnabled)
+        {
+            endpoint.RequireRateLimiting("register");
+        }
     }
 }

@@ -9,6 +9,11 @@ using Serilog;
 using Scalar.AspNetCore;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 using idnetityServiceWedApi.Messaging;
+using idnetityServiceWedApi.Configuration;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,6 +27,49 @@ Log.Logger = new LoggerConfiguration()
 builder.Host.UseSerilog();
 
 builder.Services.AddOpenApi();
+
+RateLimitingSettings rateLimiting = builder.Configuration
+    .GetSection(RateLimitingSettings.SectionName)
+    .Get<RateLimitingSettings>() ?? new RateLimitingSettings();
+if (rateLimiting.Enabled &&
+    (rateLimiting.RegisterPermitLimit <= 0 || rateLimiting.TokenPermitLimit <= 0 || rateLimiting.WindowSeconds <= 0))
+{
+    throw new InvalidOperationException("Enabled rate-limit values must be greater than zero.");
+}
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("register", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = rateLimiting.RegisterPermitLimit,
+            Window = TimeSpan.FromSeconds(rateLimiting.WindowSeconds),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+    options.AddPolicy("token", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = rateLimiting.TokenPermitLimit,
+            Window = TimeSpan.FromSeconds(rateLimiting.WindowSeconds),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+});
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService("IdentityService"))
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation()
+        .AddEntityFrameworkCoreInstrumentation()
+        .AddSource(OutboxActivity.Source.Name)
+        .AddOtlpExporter(options =>
+        {
+            options.Endpoint = new Uri(builder.Configuration["OpenTelemetry:OtlpEndpoint"] ?? "http://localhost:14317");
+        }));
 
 builder.Services.AddDbContext<AuthDbContext>(options =>
 {
@@ -119,11 +167,16 @@ try
 
     app.UseHttpMethodOverride();
 
+    if (rateLimiting.Enabled)
+    {
+        app.UseRateLimiter();
+    }
+
     app.UseAuthentication();
     app.UseAuthorization();
 
-    app.MapRegisterEndpoint();
-    app.MapLoginEndpoint();
+    app.MapRegisterEndpoint(rateLimiting.Enabled);
+    app.MapLoginEndpoint(rateLimiting.Enabled);
 
     await app.RunAsync();
 }
@@ -131,3 +184,5 @@ finally
 {
     await Log.CloseAndFlushAsync();
 }
+
+public partial class Program;

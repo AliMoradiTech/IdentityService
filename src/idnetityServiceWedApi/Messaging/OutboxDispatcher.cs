@@ -1,4 +1,5 @@
 using System.Text;
+using System.Diagnostics;
 using Confluent.Kafka;
 using Dapper;
 using idnetityServiceWedApi.Data;
@@ -54,10 +55,15 @@ public sealed class OutboxDispatcher(IConfiguration configuration, ILogger<Outbo
         string topic = configuration["Kafka:Topics:UserRegisteredEvents"]
             ?? throw new InvalidOperationException("Kafka:Topics:UserRegisteredEvents is required.");
 
+        // librdkafka writes to stderr unless a handler is attached, which makes its transient
+        // startup retries look like unrelated failures next to the application's own log.
         using var producer = new ProducerBuilder<Null, string>(new ProducerConfig
         {
             BootstrapServers = configuration["Kafka:BootstrapServers"], Acks = Acks.All, EnableIdempotence = true
-        }).Build();
+        })
+        .SetLogHandler((_, message) => logger.Log(ToLogLevel(message.Level), "Kafka producer [{Facility}] {Message}", message.Facility, message.Message))
+        .SetErrorHandler((_, error) => logger.Log(error.IsFatal ? LogLevel.Critical : LogLevel.Warning, "Kafka producer error {Code}: {Reason}", error.Code, error.Reason))
+        .Build();
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -77,9 +83,13 @@ public sealed class OutboxDispatcher(IConfiguration configuration, ILogger<Outbo
                     int attempts = message.Attempts + 1;
                     try
                     {
+                        using Activity? activity = OutboxActivity.StartProducerActivity(
+                            message.TraceParent, message.TraceState);
                         var headers = new Headers();
-                        if (message.TraceParent is not null) headers.Add("traceparent", Encoding.UTF8.GetBytes(message.TraceParent));
-                        if (message.TraceState is not null) headers.Add("tracestate", Encoding.UTF8.GetBytes(message.TraceState));
+                        string? traceParent = activity?.Id ?? message.TraceParent;
+                        string? traceState = activity?.TraceStateString ?? message.TraceState;
+                        if (traceParent is not null) headers.Add("traceparent", Encoding.UTF8.GetBytes(traceParent));
+                        if (traceState is not null) headers.Add("tracestate", Encoding.UTF8.GetBytes(traceState));
 
                         await producer.ProduceAsync(topic, new Message<Null, string> { Value = message.Payload, Headers = headers }, stoppingToken);
 
@@ -129,6 +139,16 @@ public sealed class OutboxDispatcher(IConfiguration configuration, ILogger<Outbo
             await Task.Delay(pollingInterval, stoppingToken);
         }
     }
+
+    // librdkafka reports syslog severities; anything at notice or below is routine chatter.
+    private static LogLevel ToLogLevel(SyslogLevel level) => level switch
+    {
+        SyslogLevel.Emergency or SyslogLevel.Alert or SyslogLevel.Critical => LogLevel.Critical,
+        SyslogLevel.Error => LogLevel.Error,
+        SyslogLevel.Warning => LogLevel.Warning,
+        SyslogLevel.Debug => LogLevel.Debug,
+        _ => LogLevel.Information
+    };
 
     private static string Truncate(string value, int maxLength) => value.Length <= maxLength ? value : value[..maxLength];
 }

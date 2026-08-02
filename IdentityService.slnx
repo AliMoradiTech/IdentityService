@@ -2,4 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/idnetityServiceWedApi/idnetityServiceWedApi.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/IdentityService.Tests/IdentityService.Tests.csproj" />
+  </Folder>
 </Solution>
